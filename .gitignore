@@ -1,0 +1,74 @@
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+env/
+.venv/
+ENV/
+
+# pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+# Jupyter Notebook checkpoint
+.ipynb_checkpoints/
+
+# 编辑器配置文件
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Mac 系统文件
+.DS_Store
+
+# 编译生成文件
+*.so
+*.dll
+*.dylib
+*.pyd
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 单元测试缓存
+.pytest_cache/
+.tox/
+
+# 日志和临时文件
+*.log
+*.tmp
+*.bak
+
+# 覆盖率报告
+htmlcov/
+.coverage
+.coverage.*
+
+# mypy 类型检查
+.mypy_cache/
+.dmypy.json
+
+# 安装的 Jupyter 扩展
+nbextensions/
+
+# VSCode Python 扩展生成的环境文件
+.env
+.env.*
+
+# 本地数据库
+*.sqlite3
+
+# 本地配置文件
+config.yaml
+*.env
+
+# 如果你用 docker
+*.pid
+docker-compose.override.yml
