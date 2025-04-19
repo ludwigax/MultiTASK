@@ -6,5 +6,6 @@ from .utils import crossref as crossref
 
 from .easy_use import (
     batch_query_openai,
-    oai_price_calculator
+    oai_price_calculator,
+    batch_query_crossref
 )

@@ -28,7 +28,7 @@ async def openai_post(session: ClientSession, data={}, **kwargs) -> Dict:
         data = await response.json()
     return data
     
-def openai_parse(response: Dict, filtered_fields=None, params=None) -> Dict[str, Union[str, Dict]]:
+def openai_parse(response: Dict, save_path=None, filtered_fields=None, **kwargs) -> Dict[str, Union[str, Dict]]:
     content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
     model = response.get("model", "")
 
@@ -42,19 +42,15 @@ def openai_parse(response: Dict, filtered_fields=None, params=None) -> Dict[str,
             "output_tokens": usage.get("completion_tokens_details", {}).get("accepted_prediction_tokens", 0)
         }
 
+    if save_path:
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
     return {
         "content": content,
         "model": model,
         "token_usage": token_usage
     }
-
-def openai_save(data, params=None, **kwargs):
-    if not params.get("save_path"):
-        raise ValueError("The 'save_path' field is required.")
-    results = openai_parse(data)
-    with open(params["save_path"], "w", encoding="utf-8") as f:
-        f.write(results["content"])
-    return results
 
 # def openai_post(data):
 #     raise NotImplementedError("There is no post-processing function for OpenAI API.")

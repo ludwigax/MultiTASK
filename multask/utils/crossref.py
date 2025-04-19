@@ -1,27 +1,48 @@
 from aiohttp import ClientSession
+from typing import Dict, Union
 from .. import AsyncCake
 import itertools
 
-async def crossref_scrap(session: ClientSession, doi=None, params={}, **kwargs):
+async def crossref_doi_scrap(session: ClientSession, params: Dict={}, mailto=None, **kwargs):
+    doi = params.get("doi")
+    if doi is None:
+        raise ValueError("DOI is required for single DOI search.")
+    
+    if mailto:
+        params["mailto"] = mailto
+
     url = f"https://api.crossref.org/works/{doi}"
     async with session.get(url, params=params) as response:
         response.raise_for_status()
         data = await response.json()
         return data
     
-async def crossref_batch_scrap(session: ClientSession, params={}, cursor=False, **kwargs):
-    url = "https://api.crossref.org/works"
+async def crossref_kwd_scrap(session: ClientSession, params: Dict={}, cursor=False, mailto=None, **kwargs):
+    if params.get("query") is None:
+        raise ValueError("Query is required for keyword search.")
+    
+    if mailto:
+        params["mailto"] = mailto
 
+    url = "https://api.crossref.org/works"
     async with session.get(url, params=params) as response:
         response.raise_for_status()
         data = await response.json()
         return data
     
 def crossref_parse(data, filtered_fields=None, **kwargs):
-    if data.get("message") and data["message"].get("items"):
-        items = data["message"]["items"]
-    elif data.get("message"):
-        items = [data["message"]]
+    if not isinstance(data, dict):
+        raise ValueError("Data should be a dictionary.")
+    
+    if data.get("status") != "ok":
+        raise ValueError("Invalid response from CrossRef API.")
+    
+    if data.get("message-type") == "work":
+        items = [data.get("message")]
+    elif data.get("message-type") == "work-list":
+        items = data.get("message", {}).get("items", [])
+    else:
+        raise ValueError("Unknown message type in response.")
 
     metadata_list = []
     for item in items:
@@ -90,7 +111,7 @@ if __name__=="__main__":
         tasks.append(task)
     
     async_crawler = AsyncCake(
-        worker=crossref_batch_scrap,
+        worker=crossref_kwd_scrap,
         helper=crossref_parse,
         post=crossref_post,
         max_workers=3,

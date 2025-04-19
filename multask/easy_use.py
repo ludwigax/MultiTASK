@@ -6,6 +6,7 @@ from .utils import pdf as pdf
 import os
 import warnings
 from typing import List, Tuple, Dict, Union, Optional, Any
+import itertools
 
 def batch_query_openai(
         messages: List[List],
@@ -74,14 +75,9 @@ def batch_query_openai(
             task["save_path"] = save_paths[i]
         tasks.append(task)
 
-    if save_paths:
-        helper = openai.openai_save
-    else:
-        helper = openai.openai_parse
-
     async_cake = AsyncCake(
         worker=openai.openai_post,
-        helper=helper,
+        helper=openai.openai_parse,
         max_workers=max_workers,
         max_concurrent_requests=max_workers,
         rpm_cap=rpm_cap,
@@ -95,10 +91,12 @@ def batch_query_openai(
 
 def oai_price_calculator(token_usages: Union[Dict, List[Dict]], model_name: str) -> float:
     """
-    token_usage (Dict or List[Dict]): 
-    model_name (str): e.g. "gpt-4", "gpt-4-32k", "gpt-3.5-turbo"。
+    Args:
+        token_usage (Dict or List[Dict]): 
+        model_name (str): e.g. "gpt-4", "gpt-4-32k", "gpt-3.5-turbo"。
 
-    float: total cost in USD.
+    Returns:
+        float: total cost in USD.
     """
 
     pricing = {
@@ -133,13 +131,33 @@ def oai_price_calculator(token_usages: Union[Dict, List[Dict]], model_name: str)
 
 
 def batch_query_crossref(
-        queries: List[str],
+        wanteds: List[Dict],
         mailto: Optional[str] = None,
         proxy: Optional[str] = None,
         rpm_cap = 1000,
         max_workers = 5,
         random_delay = False, # avoid for 429 error
-    ):
+        query_params: Dict[str, Any] = {},
+    ) -> List:
+    """
+    Queries Crossref API with multiple tasks using DOI or keywords in parallel.
+
+    Args:
+        wanteds (list): List of dicts with 'dois', 'query', 'n', and 'batch_size'.
+        mailto (str): Email for faster API response.
+        proxy (str): Proxy server address.
+        rpm_cap (int): Max requests per minute.
+        random_delay (bool): Enable random delay to avoid 429 errors.
+        query_params (dict): Query parameters dictionary, suitable for global settings, such as:
+            filter: Filter condition (e.g. "type:journal-article")
+            sort: Sort field (e.g. "score", "updated", "deposited", "published", "issued")
+            order: Sort order (e.g. "asc", "desc")
+            select: Select returned fields (e.g. "DOI,title,author")
+            etc.
+
+    Returns:
+        list: Tuples of task index and result.
+    """
     if proxy:
         print("Proxy is set:", proxy)
         os.environ["PROXY"] = proxy
@@ -147,22 +165,71 @@ def batch_query_crossref(
     if random_delay:
         print("Random delay is enabled.")
 
+    def process_wanted(wanted: Dict) -> List[Dict]:
+        """
+        `process_wanted` processes the wanted dictionary to extract the query and DOI list.
+        """
+        if "dois" in wanted:
+            _type = "doi"
+        elif "query" in wanted:
+            _type = "query"
+        else:
+            raise ValueError("Either 'query' or 'doi_list' must be provided.")
+        
+        mytasks = []
+        if _type == "doi":
+            doi_list = wanted.get("dois", [])
+            
+            for i, doi in enumerate(doi_list):
+                mytasks.append({
+                    "name": f"DOI-{i}",
+                    "params": {
+                        "doi": doi,
+                        "mailto": mailto,
+                    },
+                    "task_type": _type
+                })
+        elif _type == "query":
+            query = wanted.get("query", "")
+            n = wanted.get("n", 50)
+            batch_size = wanted.get("batch_size", 20)
+
+            num_batches = (n + batch_size - 1) // batch_size
+            for i in range(num_batches):
+                current_batch_size = min(batch_size, n - i * batch_size)
+                mytasks.append({
+                    "name": f"Query-{i}",
+                    "params": {
+                        "query": query,
+                        "rows": current_batch_size,
+                        "offset": i * batch_size,
+                        "mailto": mailto,
+                        **query_params
+                    },
+                    "task_type": _type
+                })
+        
+        return mytasks
+
     tasks = []
-    for i in range(len(queries)):
-        task = {
-            "name": f"Task {i}",
-            "params": {
-                "query": queries[i],
-                "rows": 1,
-                "mailto": mailto
-            }
-        }
-        tasks.append(task)
+    indices = []
+    for i, wt in enumerate(wanteds):
+        prelength = len(tasks)
+        tasks.extend(process_wanted(wt))
+        indices.extend([i] * (len(tasks) - prelength))
+
+    async def dynamic_worker(session, task_type, **kwargs):
+        """
+        dynamic_worker for Crossref API, dynamically selects the worker function based on task type.
+        """
+        if task_type == "doi":
+            return await crf.crossref_doi_scrap(session, **kwargs)
+        else:
+            return await crf.crossref_kwd_scrap(session, **kwargs)
 
     async_cake = AsyncCake(
-        worker=crf.crossref_batch_scrap,
+        worker=dynamic_worker,
         helper=crf.crossref_parse,
-        # post=crf.crossref_post,
         max_workers=max_workers,
         max_concurrent_requests=max_workers,
         rpm_cap=rpm_cap,
@@ -171,4 +238,74 @@ def batch_query_crossref(
     )
 
     results = async_cake.run(tasks)
-    return results
+    
+    wanted_results = []
+    for i in range(len(wanteds)):
+        tmp_res = []
+        for j, res in enumerate(results):
+            if indices[j] == i:
+                tmp_res.append(res)
+
+        if "query" in wanteds[i]:
+            tmp_res = list(itertools.chain.from_iterable(tmp_res))
+        wanted_results.append((i, tmp_res))
+    return wanted_results
+
+
+
+# Example usage of the functions in this module
+if __name__ == "__main__":
+    EXAMPLE = False
+
+    if EXAMPLE:
+        # OpenAI API 调用示例
+        messages = [
+            [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the capital of France?"}
+            ],
+            [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the capital of Germany?"}
+            ]
+        ]
+        results = batch_query_openai(
+            messages=messages,
+            chat_params={"model": "gpt-4o-mini"},
+            random_delay=True
+        )
+        print(results)
+        
+        # Crossref API调用示例
+        wanteds = [
+            # DOI列表查询
+            {
+                "dois": [
+                    "10.1038/s41586-020-2649-2",
+                    "10.1126/science.aaa8415"
+                ]
+            },
+            # 关键词查询
+            {
+                "query": "quantum computing",
+                "n": 10,
+                "batch_size": 5
+            },
+            # 另一个关键词查询
+            {
+                "query": "artificial intelligence",
+                "n": 10,
+                "batch_size": 5
+            }
+        ]
+        
+        results = batch_query_crossref(
+            wanteds=wanteds,
+            mailto="your.email@example.com",
+            query_params={
+                "filter": "type:journal-article",
+                "sort": "relevance",
+                "order": "desc"
+            }
+        )
+        print(results)
