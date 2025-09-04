@@ -2,12 +2,16 @@ from setuptools import setup, find_packages
 
 setup(
     name="multask",
-    version="0.3.1",
+    version="0.4.0",
     packages=find_packages(),
     install_requires=[
-        "aiohttp"
+        "aiohttp",
+        "tqdm"
     ],
-    description="multask is a Python package for asynchronous task execution.",
+    extras_require={
+        "pdf": ["pdfplumber", "pdfminer.six"],
+    },
+    description="Modern Python package for concurrent task execution with intelligent error handling.",
     long_description=open('README.md').read(),
     long_description_content_type="text/markdown",
     author="Ludwig",

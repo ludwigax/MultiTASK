@@ -1,16 +1,18 @@
 # Multask Package
 
-Multask is an efficient Python library for handling concurrent API requests and data processing tasks. It provides a powerful framework for asynchronous and threaded task execution, optimized for bulk API calls to OpenAI and academic data APIs.
+Multask is an efficient Python library for handling concurrent API requests and data processing tasks. It provides a powerful framework for asynchronous and threaded task execution, with built-in error handling, rate limiting, and circuit breaker patterns.
 
 ## Key Features
 
-- **Efficient Concurrency**: Built on `AsyncCake` and `ThreadedCake`, supporting both asynchronous and threaded concurrency.
-- **Rate Limiting**: Built-in request rate control (RPM) to avoid triggering API rate limits.
-- **Automatic Retries**: Intelligent retry mechanism to handle temporary network errors or service interruptions.
-- **Cost Calculation**: OpenAI API cost calculator based on token usage.
-- **API Integrations**:
+- **Modern Architecture**: Built on `AsyncExecutor` and `ThreadExecutor` with advanced error handling
+- **Intelligent Error Handling**: Automatic classification and handling of different error types
+- **Circuit Breaker Pattern**: Fault tolerance with user interaction options
+- **Adaptive Rate Limiting**: Smart rate limiting with backoff and recovery
+- **Optional Dependencies**: Graceful handling of missing dependencies
+- **Predefined API Interfaces**:
   - OpenAI API (supports GPT series models and cost tracking)
-  - Crossref API (academic literature retrieval)
+  - CrossRef API (academic literature metadata retrieval)  
+  - PDF Processing (document text extraction)
 
 ## Installation
 
@@ -20,106 +22,160 @@ pip install multask
 
 ## Quick Start
 
-### Batch OpenAI API Requests
+### Using Predefined API Interfaces
 
 ```python
-from multask import batch_query_openai, oai_price_calculator
+from multask import apis
 
-messages = [
-    [{"role": "system", "content": "You are a helpful assistant."},
-     {"role": "user", "content": "What is the capital of France?"}]
-] * 5  # Create 5 identical requests
+# Check available APIs
+print("Available APIs:", apis.get_available_apis())
 
-results = batch_query_openai(
-    messages=messages,
-    api_key="your_api_key",  # Optional, can also set via environment variable
-    proxy="http://your_proxy",  # Optional
-    max_workers=5,
-    chat_params={"model": "gpt-4o-mini"},
-    random_delay=True  # Avoid 429 errors
-)
+# OpenAI API
+if 'openai' in apis.get_available_apis():
+    messages_list = [
+        [{"role": "user", "content": "What is machine learning?"}],
+        [{"role": "user", "content": "Explain quantum computing."}]
+    ]
+    
+    results = await apis.openai_batch_query(
+        messages_list=messages_list,
+        model="gpt-4o-mini",
+        max_workers=3,
+        rate_limit_rpm=100
+    )
+    
+    # Calculate cost
+    token_usages = [r.get('token_usage', {}) for r in results]
+    cost = apis.openai_price_calculator(token_usages, "gpt-4o-mini")
+    print(f"Total cost: ${cost}")
 
-# Calculate API usage cost
-total_cost = oai_price_calculator(
-    [r["token_usage"] for r in results], 
-    "gpt-4o-mini"
-)
-print(f"Total cost: ${total_cost}")
+# CrossRef API
+if 'crossref' in apis.get_available_apis():
+    requests = [
+        {'type': 'doi', 'doi': '10.1038/nature12373'},
+        {'type': 'query', 'query': 'machine learning', 'rows': 5}
+    ]
+    
+    results = await apis.crossref_batch_query(
+        requests=requests,
+        mailto="researcher@university.edu",
+        max_workers=2
+    )
+
+# PDF Processing
+if 'pdf' in apis.get_available_apis():
+    results = await apis.pdf_batch_extract(
+        pdf_paths=["doc1.pdf", "doc2.pdf"],
+        output_dir="extracted_texts",
+        method="advanced"
+    )
 ```
 
-### Crossref Academic Literature Query
+### Using Core Executors for Custom Tasks
 
 ```python
-from multask import batch_query_crossref
+import multask
+import aiohttp
 
-wanteds = [
-    {
-        "dois": ["10.1038/s41586-020-2649-2"],
-    },
-    {
-        "query": "quantum computing",
-        "n": 10,
-        "batch_size": 5
-    }
-]
+async def custom_api_worker(session, endpoint, api_key, **kwargs):
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with session.get(endpoint, headers=headers) as response:
+        return await response.json()
 
-results = batch_query_crossref(
-    wanteds=wanteds,
-    mailto="your.email@example.com",  # Recommended to increase request priority
-    max_workers=3
-)
-
-# Example to print results
-for idx, res in results:
-    print(f"Query {idx} returned {len(res)} results")
+# Create executor with shared context
+async with aiohttp.ClientSession() as session:
+    executor = multask.AsyncExecutor(
+        worker=custom_api_worker,
+        shared_context={
+            "session": session,
+            "api_key": "your-api-key"
+        },
+        max_workers=5,
+        rate_limit_config=multask.RateLimitConfig(base_rpm=100),
+        circuit_breaker_config=multask.CircuitBreakerConfig(failure_threshold=3)
+    )
+    
+    tasks = [
+        {"endpoint": "https://api.example.com/users"},
+        {"endpoint": "https://api.example.com/posts"}
+    ]
+    
+    results = await executor.execute(tasks)
 ```
 
-### Custom Asynchronous Task Processing
+## Architecture
 
-```python
-from multask import AsyncCake
+### Core Components
 
-async def custom_worker(session, url, **kwargs):
-    async with session.get(url) as response:
-        return await response.text()
+- **`AsyncExecutor`**: Modern asynchronous task executor with intelligent error handling
+- **`ThreadExecutor`**: Thread-based executor for CPU-bound or synchronous tasks
+- **`RateLimiter`**: Adaptive rate limiting with backoff and recovery
+- **`CircuitBreaker`**: Fault tolerance pattern with user interaction options
 
-def process_result(data, **kwargs):
-    return {"length": len(data), "preview": data[:100]}
+### Exception Hierarchy
 
-tasks = [
-    {"name": "Task 1", "url": "https://example.com/api/1"},
-    {"name": "Task 2", "url": "https://example.com/api/2"}
-]
+- **`MultaskError`**: Base exception with severity classification
+- **`InternetError`**: Connectivity issues (triggers circuit breaker)
+- **`FatalError`**: Programming errors (stops execution)
+- **`RateLimitError`**: Rate limiting with adaptive backoff
+- **`NetworkInstabilityError`**: Temporary issues (retryable)
 
-async_cake = AsyncCake(
-    worker=custom_worker,
-    helper=process_result,
-    max_workers=5,
-    rpm_cap=100
-)
+### Predefined API Interfaces
 
-results = async_cake.run(tasks)
+- **`apis.openai_*`**: OpenAI API integration with cost tracking
+- **`apis.crossref_*`**: CrossRef academic literature API
+- **`apis.pdf_*`**: PDF document processing (optional dependency)
+
+## Installation Options
+
+### Basic Installation
+```bash
+pip install multask
 ```
 
-## Core Modules
+### With Optional Dependencies
+```bash
+# For PDF processing
+pip install multask[pdf]  # or: pip install pdfplumber pdfminer.six
 
-- **AsyncCake**: An asynchronous request framework based on `asyncio` and `aiohttp`.
-- **OpenAI Tools**: OpenAI API integration with cost calculation utilities.
-- **Crossref Tools**: Crossref API integration for academic literature queries.
+# For development
+pip install multask[dev]  # includes testing dependencies
+```
 
 ## Advanced Features
 
-### Cost Calculation
+### Error Handling and Circuit Breaker
 
 ```python
-# Calculate OpenAI API costs based on token usage
-total_cost = oai_price_calculator(
-    token_usages=[{"prompt_tokens": 100, "completion_tokens": 200}], 
-    model_name="gpt-4o-mini"
+from multask import AsyncExecutor, CircuitBreakerConfig, RateLimitConfig
+
+executor = AsyncExecutor(
+    worker=my_worker,
+    circuit_breaker_config=CircuitBreakerConfig(
+        failure_threshold=5,  # Open circuit after 5 failures
+        timeout=60.0,        # Try half-open after 60 seconds
+        success_threshold=3   # Close after 3 successes
+    ),
+    rate_limit_config=RateLimitConfig(
+        base_rpm=100,                    # Base rate limit
+        rate_limit_backoff_factor=2.0,   # Backoff multiplier
+        max_backoff_factor=10.0          # Maximum backoff
+    ),
+    enable_user_interaction=True  # Prompt user on circuit breaker
 )
-print(f"Total cost: ${total_cost}")
 ```
 
-### Request Rate Control and Random Delay
+### Graceful Dependency Handling
 
-Refer to the OpenAI API batch request example in the quick start section for usage of rate limiting and random delay features.
+```python
+from multask import apis
+
+# Check what's available
+available_apis = apis.get_available_apis()
+print(f"Available: {available_apis}")
+
+# Check specific API
+available, error = apis.check_api_availability('pdf')
+if not available:
+    print(f"PDF processing unavailable: {error}")
+```
