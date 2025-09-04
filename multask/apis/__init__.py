@@ -16,8 +16,9 @@ _available_apis = []
 try:
     from .crossref_api import CrossRefExecutor, crossref_batch_query
     _available_apis.append('crossref')
-    __all__ = getattr(__all__ if '__all__' in locals() else [], []) + [
-        'CrossRefExecutor', 'crossref_batch_query'
+    __all__ = (locals().get("__all__", [])) + [
+        "CrossRefExecutor",
+        "crossref_batch_query",
     ]
 except ImportError as e:
     CrossRefExecutor = None
@@ -28,7 +29,7 @@ except ImportError as e:
 try:
     from .openai_api import OpenAIExecutor, openai_batch_query, openai_price_calculator
     _available_apis.append('openai')
-    __all__ = getattr(__all__ if '__all__' in locals() else [], []) + [
+    __all__ = (locals().get("__all__", [])) + [
         'OpenAIExecutor', 'openai_batch_query', 'openai_price_calculator'
     ]
 except ImportError as e:
@@ -41,7 +42,7 @@ except ImportError as e:
 try:
     from .pdf_api import PDFExecutor, pdf_batch_extract
     _available_apis.append('pdf')
-    __all__ = getattr(__all__ if '__all__' in locals() else [], []) + [
+    __all__ = (locals().get("__all__", [])) + [
         'PDFExecutor', 'pdf_batch_extract'
     ]
 except ImportError as e:
