@@ -110,7 +110,6 @@ class AsyncCake:
                     try:
                         if self.random_delay:
                             await asyncio.sleep(random.uniform(0.4, 1 * self.max_workers / 5))
-
                         
                         data = await self._worker(session, **task_params)
                         if self._helper:

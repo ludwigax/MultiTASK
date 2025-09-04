@@ -1,7 +1,9 @@
 import os
-from typing import Dict, Union
+import json
+import asyncio
+from typing import Dict, Union, List
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientTimeout
 from .. import AsyncCake
 
 async def openai_post(session: ClientSession, data={}, **kwargs) -> Dict:
@@ -22,35 +24,115 @@ async def openai_post(session: ClientSession, data={}, **kwargs) -> Dict:
         data["model"] = "gpt-4o-mini"
     if not data.get("messages"):
         raise ValueError("The 'messages' field is required.")
-
-    async with session.post(url, json=data, headers=headers, proxy=proxy) as response:
-        response.raise_for_status()
-        data = await response.json()
-    return data
     
-def openai_parse(response: Dict, save_path=None, filtered_fields=None, **kwargs) -> Dict[str, Union[str, Dict]]:
-    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-    model = response.get("model", "")
+    is_streaming = data.get("stream", False)
 
-    usage = response.get("usage", {})
-    if usage:
-        token_usage = {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-            "reasoning_tokens": usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0),
-            "output_tokens": usage.get("completion_tokens_details", {}).get("accepted_prediction_tokens", 0)
+    if is_streaming:
+        return await _collect_streaming_chunks(session, url, data, headers, proxy)
+    else:
+        async with session.post(url, json=data, headers=headers, proxy=proxy) as response:
+            response.raise_for_status()
+            data = await response.json()
+        return data
+
+
+async def _collect_streaming_chunks(session: ClientSession, url: str, data: dict, headers: dict, proxy: str) -> str:
+    """Collect all streaming chunks while session is active"""
+    chunks = []
+
+    timeout = ClientTimeout(
+        total=480,      # 8 minutes total timeout
+        connect=30,     # 30 seconds to establish connection
+        sock_read=60    # 60 seconds between chunks 
+    )
+    
+    try:
+        async with session.post(url, json=data, headers=headers, proxy=proxy, timeout=timeout) as response:
+            response.raise_for_status()
+
+            content_type = response.headers.get('content-type', '')
+            if 'text/event-stream' not in content_type and 'text/plain' not in content_type:
+                print(f"Warning: Unexpected content-type for streaming: {content_type}")
+            
+            chunk_count = 0
+            async for line in response.content:
+                line_str = line.decode('utf-8').strip()
+                
+                if not line_str or line_str.startswith(':'):
+                    continue
+            
+                # Parse SSE format
+                if line_str.startswith('data: '):
+                    data_str = line_str[6:]
+            
+                if data_str.strip() == '[DONE]':
+                    break
+            
+                try:
+                    chunk_data = json.loads(data_str)
+                
+                    # Extract content from streaming response
+                    if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
+                        choice = chunk_data['choices'][0]
+                        delta = choice.get('delta', {})
+                    
+                        if choice.get('finish_reason') is not None:
+                            break
+                        
+                        if 'content' in delta and delta['content']:
+                            chunks.append(delta['content'])
+                            chunk_count += 1
+
+                except json.JSONDecodeError:
+                    continue
+
+    except asyncio.TimeoutError:
+        print("Connection timeout during streaming request")
+        raise
+    except Exception as e:
+        print(f"Streaming error: {type(e).__name__}: {e}")
+        raise
+    
+    return ''.join(chunks)
+                        
+    
+def openai_parse(response: Union[Dict, str], save_path=None, filtered_fields=None, **kwargs) -> Dict[str, Union[str, object, Dict]]:
+    # Check if response is a list of streaming chunks
+    if isinstance(response, str):
+        # Streaming response - return generator that yields string chunks
+        model = kwargs.get("model", "")
+        
+        return {
+            "content": response,  # Return generator that yields str chunks
+            "model": model,
+            "token_usage": {}  # Token usage not available in streaming mode
         }
+    else:
+        # Non-streaming response - original behavior
+        content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        model = response.get("model", "")
 
-    if save_path:
-        with open(save_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        usage = response.get("usage", {})
+        token_usage = {}
+        if usage:
+            completion_tokens_details = usage.get("completion_tokens_details") or {}
+            token_usage = {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+                "reasoning_tokens": completion_tokens_details.get("reasoning_tokens", 0),
+                "output_tokens": completion_tokens_details.get("accepted_prediction_tokens", 0)
+            }
 
-    return {
-        "content": content,
-        "model": model,
-        "token_usage": token_usage
-    }
+        if save_path:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+        return {
+            "content": content,
+            "model": model,
+            "token_usage": token_usage
+        } 
 
 # def openai_post(data):
 #     raise NotImplementedError("There is no post-processing function for OpenAI API.")

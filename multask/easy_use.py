@@ -18,7 +18,7 @@ def batch_query_openai(
         max_workers = 5,
         random_delay = False, # avoid for 429 error
         chat_params: Dict[str, Any] = {},
-    ) -> List:
+    ) -> List[Tuple[int, Dict]]:
     """
     chat_params: {
     model: str (required),
@@ -39,7 +39,7 @@ def batch_query_openai(
     if not chat_params.get("model"):
         chat_params["model"] = "gpt-4o-mini"
 
-    if (not chat_params["model"] in ["o1-mini", "o3-mini"]) \
+    if (not chat_params["model"] in ["o1-mini", "o3-mini", "o4-mini"]) \
         and chat_params.get("reasoning_effort") is not None:
         warnings.warn("The 'reasoning_effort' field is only available for the 'o1-mini' and 'o3-mini' models.")
         chat_params["reasoning_effort"] = None
