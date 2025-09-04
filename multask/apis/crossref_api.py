@@ -355,6 +355,7 @@ async def crossref_batch_query(
         
         results = await executor.execute(tasks)
     
+    return results
     # Extract just the processed data (remove index info)
-    return [result[1] if isinstance(result[1], dict) and 'error' not in result[1] 
-            else result[1] for result in results]
+    # return [result[1] if isinstance(result[1], dict) and 'error' not in result[1] 
+    #         else result[1] for result in results]
