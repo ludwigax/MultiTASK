@@ -42,7 +42,8 @@ class BaseExecutor(ABC):
         max_retries: int = 3,
         rate_limit_config: Optional[RateLimitConfig] = None,
         circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
-        enable_user_interaction: bool = True
+        enable_user_interaction: bool = True,
+        shared_context: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize base executor.
@@ -55,12 +56,14 @@ class BaseExecutor(ABC):
             rate_limit_config: Rate limiting configuration
             circuit_breaker_config: Circuit breaker configuration  
             enable_user_interaction: Whether to prompt user on circuit breaker
+            shared_context: Shared parameters passed to all worker calls
         """
         self.worker = worker
         self.result_processor = result_processor
         self.max_workers = max_workers
         self.max_retries = max_retries
         self.enable_user_interaction = enable_user_interaction
+        self.shared_context = shared_context or {}
         
         # Initialize components
         self.rate_limiter = RateLimiter(rate_limit_config)
@@ -174,27 +177,26 @@ class AsyncExecutor(BaseExecutor):
             for i, task in enumerate(tasks):
                 await self.task_queue.put((i, task))
             
-            # Start worker coroutines
-            async with aiohttp.ClientSession() as session:
-                workers = [
-                    asyncio.create_task(self._worker_coroutine(session))
-                    for _ in range(self.max_workers)
-                ]
+            # Start worker coroutines without forcing session creation
+            workers = [
+                asyncio.create_task(self._worker_coroutine())
+                for _ in range(self.max_workers)
+            ]
+            
+            try:
+                # Wait for all tasks to complete
+                await self.task_queue.join()
                 
-                try:
-                    # Wait for all tasks to complete
-                    await self.task_queue.join()
-                    
-                    # Cancel workers
-                    for worker in workers:
-                        worker.cancel()
-                    
-                    # Gather results
-                    results = await asyncio.gather(*workers, return_exceptions=True)
-                    
-                except asyncio.CancelledError:
-                    self._close_progress_bars()
-                    raise
+                # Cancel workers
+                for worker in workers:
+                    worker.cancel()
+                
+                # Gather results
+                results = await asyncio.gather(*workers, return_exceptions=True)
+                
+            except asyncio.CancelledError:
+                self._close_progress_bars()
+                raise
                 
             # Flatten and sort results
             flattened_results = []
@@ -213,7 +215,7 @@ class AsyncExecutor(BaseExecutor):
         finally:
             self._close_progress_bars()
     
-    async def _worker_coroutine(self, session: aiohttp.ClientSession) -> List[Tuple[int, Any]]:
+    async def _worker_coroutine(self) -> List[Tuple[int, Any]]:
         """Individual worker coroutine."""
         worker_results = []
         
@@ -231,7 +233,7 @@ class AsyncExecutor(BaseExecutor):
                 continue
             
             async with self.semaphore:
-                result = await self._execute_single_task(session, index, task_params)
+                result = await self._execute_single_task(index, task_params)
                 if result is not None:
                     worker_results.append(result)
                 
@@ -248,7 +250,6 @@ class AsyncExecutor(BaseExecutor):
     
     async def _execute_single_task(
         self, 
-        session: aiohttp.ClientSession, 
         index: int, 
         task_params: Dict[str, Any]
     ) -> Optional[Tuple[int, Any]]:
@@ -261,13 +262,15 @@ class AsyncExecutor(BaseExecutor):
                     delay = random.uniform(0.1, 0.5)
                     await asyncio.sleep(delay)
                 
+                # Combine shared context with task-specific parameters
+                # Task parameters take precedence over shared context
+                combined_params = {**self.shared_context, **task_params}
+                
                 # Execute task through circuit breaker
                 result = await self.circuit_breaker.call(
-                    self.worker, session, **task_params
+                    self.worker, **combined_params
                 )
                 
-                # Apply result processor if provided and it's not the final processor
-                # (The final processor is applied to all results at once)
                 return (index, result)
                 
             except CircuitBreakerError as e:
@@ -400,8 +403,12 @@ class ThreadExecutor(BaseExecutor):
                 while self.rate_limiter.current_rpm >= self.rate_limiter.effective_rpm:
                     time.sleep(1.0)
                 
+                # Combine shared context with task-specific parameters
+                # Task parameters take precedence over shared context
+                combined_params = {**self.shared_context, **task_params}
+                
                 # Execute task
-                result = self.worker(**task_params)
+                result = self.worker(**combined_params)
                 
                 # Record successful request
                 self.rate_limiter.request_timestamps.append(time.time())

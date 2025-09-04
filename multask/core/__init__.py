@@ -17,9 +17,9 @@ from .exceptions import (
     CircuitBreakerError
 )
 
-from .rate_limiter import RateLimiter
+from .rate_limiter import RateLimiter, RateLimitConfig
 from .executors import AsyncExecutor, ThreadExecutor
-from .circuit_breaker import CircuitBreaker
+from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 
 __all__ = [
     # Exceptions
