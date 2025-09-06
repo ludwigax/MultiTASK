@@ -22,8 +22,11 @@ from .exceptions import (
     MultaskError, ErrorSeverity, classify_exception,
     RateLimitError, NetworkInstabilityError, CircuitBreakerError
 )
-from .rate_limiter import RateLimiter, RateLimitConfig
-from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig, UserInteractionHandler
+from .controllers import (
+    BaseController, BasicController, SmartController,
+    BasicControllerConfig, SmartControllerConfig,
+    UserInteractionHandler
+)
 
 
 class BaseExecutor(ABC):
@@ -40,8 +43,10 @@ class BaseExecutor(ABC):
         result_processor: Optional[Callable] = None,
         max_workers: int = 5,
         max_retries: int = 3,
-        rate_limit_config: Optional[RateLimitConfig] = None,
-        circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
+        controller: Optional[BaseController] = None,
+        controller_type: str = "smart",  # "basic" or "smart"
+        basic_controller_config: Optional[BasicControllerConfig] = None,
+        smart_controller_config: Optional[SmartControllerConfig] = None,
         enable_user_interaction: bool = True,
         shared_context: Optional[Dict[str, Any]] = None
     ):
@@ -53,8 +58,10 @@ class BaseExecutor(ABC):
             result_processor: Optional function to process final results
             max_workers: Maximum number of concurrent workers
             max_retries: Maximum retry attempts for recoverable errors
-            rate_limit_config: Rate limiting configuration
-            circuit_breaker_config: Circuit breaker configuration  
+            controller: Custom controller instance (overrides controller_type)
+            controller_type: Type of controller to use ("basic" or "smart")
+            basic_controller_config: Configuration for BasicController
+            smart_controller_config: Configuration for SmartController
             enable_user_interaction: Whether to prompt user on circuit breaker
             shared_context: Shared parameters passed to all worker calls
         """
@@ -65,9 +72,21 @@ class BaseExecutor(ABC):
         self.enable_user_interaction = enable_user_interaction
         self.shared_context = shared_context or {}
         
-        # Initialize components
-        self.rate_limiter = RateLimiter(rate_limit_config)
-        self.circuit_breaker = CircuitBreaker(circuit_breaker_config)
+        # Initialize controller
+        if controller is not None:
+            # Use provided controller
+            self.controller = controller
+        elif controller_type == "basic":
+            # Use basic controller
+            self.controller = BasicController(basic_controller_config)
+        elif controller_type == "smart":
+            # Use smart controller
+            self.controller = SmartController(smart_controller_config)
+        else:
+            raise ValueError(f"Invalid controller_type: {controller_type}. Must be 'basic' or 'smart'")
+        
+        # Store controller type for logic decisions
+        self.controller_type = controller_type if controller is None else getattr(controller, 'config', {}).get('type', 'unknown')
         
         # Progress tracking
         self.progress_bar: Optional[tqdm] = None
@@ -89,7 +108,7 @@ class BaseExecutor(ABC):
             position=0
         )
         self.rate_bar = tqdm(
-            total=self.rate_limiter.effective_rpm,
+            total=self.controller.effective_rpm,
             desc="Rate (RPM)", 
             ncols=100,
             position=1
@@ -100,8 +119,8 @@ class BaseExecutor(ABC):
         if self.progress_bar:
             self.progress_bar.refresh()
         if self.rate_bar:
-            self.rate_bar.n = self.rate_limiter.current_rpm
-            self.rate_bar.total = self.rate_limiter.effective_rpm
+            self.rate_bar.n = self.controller.current_rpm
+            self.rate_bar.total = self.controller.effective_rpm
             self.rate_bar.refresh()
     
     def _close_progress_bars(self) -> None:
@@ -116,11 +135,12 @@ class BaseExecutor(ABC):
     def _handle_circuit_breaker_error(self, error: CircuitBreakerError) -> str:
         """
         Handle circuit breaker error with user interaction.
+        Only called in adaptive mode.
         
         Returns:
             str: User action ('skip', 'retry', 'stop')
         """
-        if not self.enable_user_interaction:
+        if not self.enable_user_interaction or self.controller_type != "smart":
             return 'stop'
         
         progress_info = {
@@ -220,9 +240,6 @@ class AsyncExecutor(BaseExecutor):
         worker_results = []
         
         while not self.task_queue.empty() and not self.should_stop:
-            # Wait for rate limiting
-            await self.rate_limiter.wait_for_slot()
-            
             try:
                 # Get next task
                 index, task_params = await asyncio.wait_for(
@@ -253,65 +270,59 @@ class AsyncExecutor(BaseExecutor):
         index: int, 
         task_params: Dict[str, Any]
     ) -> Optional[Tuple[int, Any]]:
-        """Execute a single task with error handling and retries."""
+        """Execute a single task using unified controller interface."""
         
-        for attempt in range(self.max_retries + 1):
-            try:
-                # Apply random delay if enabled
-                if self.random_delay:
-                    delay = random.uniform(0.1, 0.5)
-                    await asyncio.sleep(delay)
-                
-                # Combine shared context with task-specific parameters
-                # Task parameters take precedence over shared context
-                combined_params = {**self.shared_context, **task_params}
-                
-                # Execute task through circuit breaker
-                result = await self.circuit_breaker.call(
-                    self.worker, **combined_params
-                )
+        try:
+            # Apply random delay if enabled
+            if hasattr(self, 'random_delay') and self.random_delay:
+                delay = random.uniform(0.1, 0.5)
+                await asyncio.sleep(delay)
+            
+            # Combine shared context with task-specific parameters
+            # Task parameters take precedence over shared context
+            combined_params = {**self.shared_context, **task_params}
+            
+            # Execute task using unified controller interface
+            success, result = await self.controller.execute_task(
+                self.worker, 
+                combined_params, 
+                self.max_retries
+            )
+            
+            if success:
+                return (index, result)
+            else:
+                # Check if it's a circuit breaker error that needs user interaction
+                if (isinstance(result, dict) and 
+                    (
+                        ("circuit_breaker_error" in result) or 
+                        ("fatal_error" in result)
+                    ) and 
+                    self.controller_type == "smart"):
+                    
+                    action = self._handle_circuit_breaker_error(
+                        CircuitBreakerError(result["circuit_breaker_error"])
+                    )
+                    
+                    if action == 'skip':
+                        return (index, {"error": f"Skipped due to circuit breaker: {result['circuit_breaker_error']}"})
+                    elif action == 'stop':
+                        self.should_stop = True
+                        return (index, {"error": f"Stopped due to circuit breaker: {result['circuit_breaker_error']}"})
+                    elif action == 'retry':
+                        # Retry once more
+                        success, retry_result = await self.controller.execute_task(
+                            self.worker, 
+                            combined_params, 
+                            1  # Single retry
+                        )
+                        return (index, retry_result if success else {"error": f"Retry failed: {retry_result}"})
                 
                 return (index, result)
                 
-            except CircuitBreakerError as e:
-                # Handle circuit breaker
-                action = self._handle_circuit_breaker_error(e)
-                
-                if action == 'skip':
-                    return (index, {"error": f"Skipped due to circuit breaker: {e}"})
-                elif action == 'stop':
-                    self.should_stop = True
-                    return (index, {"error": f"Stopped due to circuit breaker: {e}"})
-                elif action == 'retry':
-                    continue  # Retry this task
-                
-            except Exception as exc:
-                # Classify the exception
-                multask_error = classify_exception(exc)
-                
-                # Handle based on severity
-                if multask_error.severity == ErrorSeverity.FATAL:
-                    return (index, {"error": f"Fatal error: {multask_error}"})
-                
-                elif multask_error.severity == ErrorSeverity.RATE_LIMITED:
-                    # Update rate limiter and wait
-                    self.rate_limiter.on_rate_limit_error()
-                    if isinstance(multask_error, RateLimitError) and multask_error.retry_after:
-                        await asyncio.sleep(multask_error.retry_after)
-                    else:
-                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
-                
-                elif multask_error.severity == ErrorSeverity.RECOVERABLE:
-                    # Wait and retry
-                    await asyncio.sleep(2 ** attempt)
-                
-                else:  # CIRCUIT_BREAKER severity
-                    # Let circuit breaker handle it
-                    await self.circuit_breaker._on_failure()
-                    return (index, {"error": f"Circuit breaker error: {multask_error}"})
-        
-        # All retries exhausted
-        return (index, {"error": f"Max retries ({self.max_retries}) exceeded"})
+        except Exception as exc:
+            # This should rarely happen with the unified controller interface
+            return (index, {"error": f"Unexpected error in task execution: {exc}"})
 
 
 class ThreadExecutor(BaseExecutor):
@@ -395,48 +406,54 @@ class ThreadExecutor(BaseExecutor):
         index: int, 
         task_params: Dict[str, Any]
     ) -> Optional[Tuple[int, Any]]:
-        """Execute a single task synchronously with error handling."""
+        """Execute a single task synchronously with basic error handling."""
         
-        for attempt in range(self.max_retries + 1):
-            try:
-                # Simple rate limiting check (synchronous)
-                while self.rate_limiter.current_rpm >= self.rate_limiter.effective_rpm:
-                    time.sleep(1.0)
+        try:
+            # Simple rate limiting check (synchronous)
+            while self.controller.current_rpm >= self.controller.effective_rpm:
+                time.sleep(1.0)
+            
+            # Combine shared context with task-specific parameters
+            combined_params = {**self.shared_context, **task_params}
+            
+            # Note: ThreadExecutor currently only supports BasicController
+            # since SmartController requires async operations
+            if self.controller_type == "smart":
+                # For thread executor, we fall back to basic retry logic even with smart controller
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        result = self.worker(**combined_params)
+                        return (index, result)
+                    except Exception as exc:
+                        multask_error = classify_exception(exc)
+                        if multask_error.severity == ErrorSeverity.FATAL:
+                            return (index, {"error": f"Fatal error: {multask_error}"})
+                        elif attempt < self.max_retries:
+                            time.sleep(2 ** attempt)  # Exponential backoff
+                        else:
+                            return (index, {"error": f"Max retries ({self.max_retries}) exceeded: {exc}"})
+            else:
+                # Use basic controller - but since it's async, we need to handle it specially
+                # For now, implement basic retry logic directly
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        result = self.worker(**combined_params)
+                        return (index, result)
+                    except Exception as exc:
+                        multask_error = classify_exception(exc)
+                        if multask_error.severity == ErrorSeverity.FATAL:
+                            return (index, {"error": f"Fatal error: {multask_error}"})
+                        elif multask_error.severity == ErrorSeverity.RATE_LIMITED:
+                            if isinstance(multask_error, RateLimitError) and multask_error.retry_after:
+                                time.sleep(multask_error.retry_after)
+                            else:
+                                time.sleep(2 ** attempt)
+                        elif multask_error.severity == ErrorSeverity.RECOVERABLE:
+                            time.sleep(2 ** attempt)
+                        else:
+                            return (index, {"error": f"Critical error: {multask_error}"})
                 
-                # Combine shared context with task-specific parameters
-                # Task parameters take precedence over shared context
-                combined_params = {**self.shared_context, **task_params}
+                return (index, {"error": f"Max retries ({self.max_retries}) exceeded"})
                 
-                # Execute task
-                result = self.worker(**combined_params)
-                
-                # Record successful request
-                self.rate_limiter.request_timestamps.append(time.time())
-                
-                return (index, result)
-                
-            except Exception as exc:
-                # Classify the exception
-                multask_error = classify_exception(exc)
-                
-                # Handle based on severity
-                if multask_error.severity == ErrorSeverity.FATAL:
-                    return (index, {"error": f"Fatal error: {multask_error}"})
-                
-                elif multask_error.severity == ErrorSeverity.RATE_LIMITED:
-                    # Update rate limiter and wait
-                    self.rate_limiter.on_rate_limit_error()
-                    if isinstance(multask_error, RateLimitError) and multask_error.retry_after:
-                        time.sleep(multask_error.retry_after)
-                    else:
-                        time.sleep(2 ** attempt)  # Exponential backoff
-                
-                elif multask_error.severity == ErrorSeverity.RECOVERABLE:
-                    # Wait and retry
-                    time.sleep(2 ** attempt)
-                
-                else:  # CIRCUIT_BREAKER severity
-                    return (index, {"error": f"Circuit breaker error: {multask_error}"})
-        
-        # All retries exhausted
-        return (index, {"error": f"Max retries ({self.max_retries}) exceeded"})
+        except Exception as exc:
+            return (index, {"error": f"Unexpected error: {exc}"})

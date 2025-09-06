@@ -16,7 +16,9 @@ except ImportError:
         "aiohttp is required for CrossRef API. Install with: pip install aiohttp"
     )
 
-from ..core import AsyncExecutor, RateLimitConfig, CircuitBreakerConfig
+from ..core import AsyncExecutor
+from ..core.controllers import BasicController, SmartController, BasicControllerConfig, SmartControllerConfig
+from ..core.rate_limiter import RateLimitConfig
 from ..core.exceptions import classify_exception, FatalError
 
 
@@ -239,19 +241,29 @@ class CrossRefExecutor(AsyncExecutor):
             mailto: Email for polite pool access (recommended)
             **kwargs: Additional executor parameters
         """
-        # Set up CrossRef-specific rate limiting (be conservative)
-        if 'rate_limit_config' not in kwargs:
-            kwargs['rate_limit_config'] = RateLimitConfig(
-                base_rpm=50,  # Conservative rate limit
-                safety_factor=0.8
-            )
+        # Set up controller configuration
+        controller_type = kwargs.pop('controller_type', 'smart')  # Default to smart controller
         
-        # Set up circuit breaker
-        if 'circuit_breaker_config' not in kwargs:
-            kwargs['circuit_breaker_config'] = CircuitBreakerConfig(
-                failure_threshold=3,
-                timeout=120.0  # 2 minutes
-            )
+        if controller_type == 'smart':
+            if 'smart_controller_config' not in kwargs:
+                kwargs['smart_controller_config'] = SmartControllerConfig(
+                    rate_limit_config=RateLimitConfig(
+                        max_rpm=50,  # Conservative rate limit
+                        safety_factor=0.8
+                    ),
+                    failure_threshold=3,
+                    circuit_timeout=120.0  # 2 minutes
+                )
+        else:
+            if 'basic_controller_config' not in kwargs:
+                kwargs['basic_controller_config'] = BasicControllerConfig(
+                    rate_limit_config=RateLimitConfig(
+                        max_rpm=50,
+                        safety_factor=0.8
+                    )
+                )
+        
+        kwargs['controller_type'] = controller_type
         
         # Use dynamic worker selection
         super().__init__(
@@ -287,11 +299,12 @@ class CrossRefExecutor(AsyncExecutor):
             raise FatalError(f"Unknown task type: {task_type}")
 
 
-async def crossref_batch_query(
+def crossref_batch_query(
     requests: List[Dict[str, Any]],
     mailto: Optional[str] = None,
     max_workers: int = 3,
     rate_limit_rpm: int = 50,
+    controller_type: str = "smart",
     **executor_kwargs
 ) -> List[Dict[str, Any]]:
     """
@@ -304,6 +317,7 @@ async def crossref_batch_query(
         mailto: Email for polite pool access
         max_workers: Maximum concurrent workers
         rate_limit_rpm: Requests per minute limit
+        controller_type: Type of controller to use ("basic" or "smart")
         **executor_kwargs: Additional executor parameters
         
     Returns:
@@ -314,7 +328,7 @@ async def crossref_batch_query(
             {'type': 'doi', 'doi': '10.1038/nature12373'},
             {'type': 'query', 'query': 'machine learning', 'rows': 10}
         ]
-        results = await crossref_batch_query(requests, mailto='user@example.com')
+        results = crossref_batch_query(requests, mailto='user@example.com')
     """
     # Convert requests to tasks
     tasks = []
@@ -340,22 +354,44 @@ async def crossref_batch_query(
         
         tasks.append(task)
     
-    # Set up rate limiting
-    rate_config = RateLimitConfig(base_rpm=rate_limit_rpm, safety_factor=0.8)
+    # Internal async implementation
+    async def _async_batch_query():
+        """Internal async implementation."""
+        # Create executor with session
+        async with aiohttp.ClientSession() as session:
+            # Update rate limiting configuration for the controller
+            if controller_type == "smart":
+                executor_kwargs.setdefault('smart_controller_config', SmartControllerConfig(
+                    rate_limit_config=RateLimitConfig(max_rpm=rate_limit_rpm, safety_factor=0.8)
+                ))
+            else:
+                executor_kwargs.setdefault('basic_controller_config', BasicControllerConfig(
+                    rate_limit_config=RateLimitConfig(max_rpm=rate_limit_rpm, safety_factor=0.8)
+                ))
+            
+            executor = CrossRefExecutor(
+                mailto=mailto,
+                max_workers=max_workers,
+                controller_type=controller_type,
+                shared_context={'session': session},
+                **executor_kwargs
+            )
+            
+            return await executor.execute(tasks)
     
-    # Create executor with session
-    async with aiohttp.ClientSession() as session:
-        executor = CrossRefExecutor(
-            mailto=mailto,
-            max_workers=max_workers,
-            rate_limit_config=rate_config,
-            shared_context={'session': session},
-            **executor_kwargs
-        )
-        
-        results = await executor.execute(tasks)
+    # Run the async implementation and return results
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
-    return results
-    # Extract just the processed data (remove index info)
-    # return [result[1] if isinstance(result[1], dict) and 'error' not in result[1] 
-    #         else result[1] for result in results]
+    if loop.is_running():
+        # If we're already in an async context, use a thread pool
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, _async_batch_query())
+            return future.result()
+    else:
+        return loop.run_until_complete(_async_batch_query())

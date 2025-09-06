@@ -17,9 +17,16 @@ from .exceptions import (
     CircuitBreakerError
 )
 
-from .rate_limiter import RateLimiter, RateLimitConfig
+from .rate_limiter import BasicRateLimiter, RateLimitConfig
 from .executors import AsyncExecutor, ThreadExecutor
-from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from .controllers import (
+    BaseController, BasicController, SmartController,
+    BasicControllerConfig, SmartControllerConfig,
+    UserInteractionHandler
+)
+
+# Backward compatibility aliases
+RateLimiter = BasicRateLimiter
 
 __all__ = [
     # Exceptions
@@ -30,8 +37,15 @@ __all__ = [
     'NetworkInstabilityError',
     'CircuitBreakerError',
     # Core components
-    'RateLimiter',
+    'RateLimiter',  # Backward compatibility alias
+    'BasicRateLimiter',
     'AsyncExecutor',
-    'ThreadExecutor', 
-    'CircuitBreaker'
+    'ThreadExecutor',
+    # Controllers
+    'BaseController',
+    'BasicController',
+    'SmartController',
+    'BasicControllerConfig',
+    'SmartControllerConfig',
+    'UserInteractionHandler'
 ]

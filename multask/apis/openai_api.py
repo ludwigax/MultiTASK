@@ -18,7 +18,9 @@ except ImportError:
         "aiohttp is required for OpenAI API. Install with: pip install aiohttp"
     )
 
-from ..core import AsyncExecutor, RateLimitConfig, CircuitBreakerConfig
+from ..core import AsyncExecutor
+from ..core.controllers import BasicController, SmartController, BasicControllerConfig, SmartControllerConfig
+from ..core.rate_limiter import RateLimitConfig
 from ..core.exceptions import classify_exception, FatalError, RateLimitError
 
 
@@ -225,21 +227,31 @@ class OpenAIExecutor(AsyncExecutor):
             base_url: Custom base URL for API
             **kwargs: Additional executor parameters
         """
-        # Set up OpenAI-specific rate limiting
-        if 'rate_limit_config' not in kwargs:
-            kwargs['rate_limit_config'] = RateLimitConfig(
-                base_rpm=500,  # Conservative default
-                safety_factor=0.9,
-                rate_limit_backoff_factor=2.0,
-                max_backoff_factor=8.0
-            )
+        # Set up controller configuration
+        controller_type = kwargs.pop('controller_type', 'smart')  # Default to smart controller
         
-        # Set up circuit breaker
-        if 'circuit_breaker_config' not in kwargs:
-            kwargs['circuit_breaker_config'] = CircuitBreakerConfig(
-                failure_threshold=5,
-                timeout=60.0
-            )
+        if controller_type == 'smart':
+            if 'smart_controller_config' not in kwargs:
+                kwargs['smart_controller_config'] = SmartControllerConfig(
+                    rate_limit_config=RateLimitConfig(
+                        max_rpm=500,  # Conservative default
+                        safety_factor=0.9
+                    ),
+                    failure_threshold=5,
+                    circuit_timeout=60.0,
+                    rate_limit_backoff_factor=2.0,
+                    max_backoff_factor=8.0
+                )
+        else:
+            if 'basic_controller_config' not in kwargs:
+                kwargs['basic_controller_config'] = BasicControllerConfig(
+                    rate_limit_config=RateLimitConfig(
+                        max_rpm=500,
+                        safety_factor=0.9
+                    )
+                )
+        
+        kwargs['controller_type'] = controller_type
         
         super().__init__(
             worker=openai_chat_worker,
@@ -312,7 +324,7 @@ def openai_price_calculator(
     return round(total_cost, 6)
 
 
-async def openai_batch_query(
+def openai_batch_query(
     messages_list: List[List[Dict[str, str]]],
     model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
@@ -322,6 +334,7 @@ async def openai_batch_query(
     rate_limit_rpm: int = 500,
     random_delay: bool = False,
     chat_params: Optional[Dict[str, Any]] = None,
+    controller_type: str = "smart",
     **executor_kwargs
 ) -> List[Dict[str, Any]]:
     """
@@ -337,6 +350,7 @@ async def openai_batch_query(
         rate_limit_rpm: Requests per minute limit
         random_delay: Whether to add random delays
         chat_params: Additional chat parameters
+        controller_type: Type of controller to use ("basic" or "smart")
         **executor_kwargs: Additional executor parameters
         
     Returns:
@@ -347,7 +361,7 @@ async def openai_batch_query(
             [{"role": "user", "content": "Hello, world!"}],
             [{"role": "user", "content": "What is Python?"}]
         ]
-        results = await openai_batch_query(messages, model="gpt-4o-mini")
+        results = openai_batch_query(messages, model="gpt-4o-mini")
     """
     if save_paths and len(messages_list) != len(save_paths):
         raise ValueError("Number of save paths must match number of message lists")
@@ -368,22 +382,45 @@ async def openai_batch_query(
         
         tasks.append(task)
     
-    # Set up rate limiting
-    rate_config = RateLimitConfig(base_rpm=rate_limit_rpm, safety_factor=0.9)
+    # Internal async implementation
+    async def _async_batch_query():
+        """Internal async implementation."""
+        # Create executor with session
+        async with aiohttp.ClientSession() as session:
+            # Update rate limiting configuration for the controller
+            if controller_type == "smart":
+                executor_kwargs.setdefault('smart_controller_config', SmartControllerConfig(
+                    rate_limit_config=RateLimitConfig(max_rpm=rate_limit_rpm, safety_factor=0.9)
+                ))
+            else:
+                executor_kwargs.setdefault('basic_controller_config', BasicControllerConfig(
+                    rate_limit_config=RateLimitConfig(max_rpm=rate_limit_rpm, safety_factor=0.9)
+                ))
+            
+            executor = OpenAIExecutor(
+                api_key=api_key,
+                base_url=base_url,
+                max_workers=max_workers,
+                controller_type=controller_type,
+                random_delay=random_delay,
+                shared_context={'session': session},
+                **executor_kwargs
+            )
+            
+            return await executor.execute(tasks)
     
-    # Create executor with session
-    async with aiohttp.ClientSession() as session:
-        executor = OpenAIExecutor(
-            api_key=api_key,
-            base_url=base_url,
-            max_workers=max_workers,
-            rate_limit_config=rate_config,
-            random_delay=random_delay,
-            shared_context={'session': session},
-            **executor_kwargs
-        )
-        
-        results = await executor.execute(tasks)
+    # Run the async implementation and return results
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
-    # Extract just the processed data
-    return [result[1] for result in results]
+    if loop.is_running():
+        # If we're already in an async context, use a thread pool
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, _async_batch_query())
+            return future.result()
+    else:
+        return loop.run_until_complete(_async_batch_query())

@@ -3,7 +3,6 @@ from .core import (
     AsyncExecutor, 
     ThreadExecutor,
     RateLimiter,
-    CircuitBreaker,
     # Exceptions
     MultaskError,
     InternetError,

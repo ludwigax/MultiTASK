@@ -31,7 +31,9 @@ if not PDF_AVAILABLE:
         "Install with: pip install pdfplumber pdfminer.six"
     )
 
-from ..core import ThreadExecutor, RateLimitConfig
+from ..core import ThreadExecutor
+from ..core.controllers import BasicController, SmartController, BasicControllerConfig, SmartControllerConfig
+from ..core.rate_limiter import RateLimitConfig
 from ..core.exceptions import FatalError
 import warnings
 import re
@@ -390,9 +392,21 @@ class PDFExecutor(ThreadExecutor):
         Args:
             **kwargs: Additional executor parameters
         """
-        # PDF processing doesn't need rate limiting typically
-        if 'rate_limit_config' not in kwargs:
-            kwargs['rate_limit_config'] = RateLimitConfig(base_rpm=1000)
+        # Set up controller configuration
+        controller_type = kwargs.pop('controller_type', 'basic')  # Default to basic for PDF processing
+        
+        if controller_type == 'smart':
+            if 'smart_controller_config' not in kwargs:
+                kwargs['smart_controller_config'] = SmartControllerConfig(
+                    rate_limit_config=RateLimitConfig(max_rpm=1000, safety_factor=0.9)
+                )
+        else:
+            if 'basic_controller_config' not in kwargs:
+                kwargs['basic_controller_config'] = BasicControllerConfig(
+                    rate_limit_config=RateLimitConfig(max_rpm=1000, safety_factor=0.9)
+                )
+        
+        kwargs['controller_type'] = controller_type
         
         super().__init__(
             worker=pdf_extract_worker,
@@ -400,12 +414,13 @@ class PDFExecutor(ThreadExecutor):
         )
 
 
-async def pdf_batch_extract(
+def pdf_batch_extract(
     pdf_paths: List[str],
     output_dir: Optional[str] = None,
     method: str = "advanced",
     max_workers: int = 3,
     no_references: bool = True,
+    controller_type: str = "basic",
     **executor_kwargs
 ) -> List[Dict[str, Any]]:
     """
@@ -417,6 +432,7 @@ async def pdf_batch_extract(
         method: Extraction method ('simple' or 'advanced')
         max_workers: Maximum concurrent workers
         no_references: Whether to remove references section
+        controller_type: Type of controller to use ("basic" or "smart")
         **executor_kwargs: Additional executor parameters
         
     Returns:
@@ -446,10 +462,23 @@ async def pdf_batch_extract(
     # Create executor
     executor = PDFExecutor(
         max_workers=max_workers,
+        controller_type=controller_type,
         **executor_kwargs
     )
     
-    results = await executor.execute(tasks)
+    # Execute tasks - PDF executor is already synchronous
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
-    # Extract just the processed data
-    return [result[1] for result in results]
+    if loop.is_running():
+        # If we're already in an async context, use a thread pool
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as thread_executor:
+            future = thread_executor.submit(lambda: asyncio.run(executor.execute(tasks)))
+            return future.result()
+    else:
+        return loop.run_until_complete(executor.execute(tasks))
