@@ -1,98 +1,227 @@
 # Multask Package
 
-Multask is an efficient Python library for handling concurrent API requests and data processing tasks. It provides a powerful framework for asynchronous and threaded task execution, with built-in error handling, rate limiting, and circuit breaker patterns.
+Multask is a high-performance Python library for concurrent task execution with intelligent error handling, adaptive rate limiting, and circuit breaker patterns. Built with a clean, unified architecture, it provides both core execution engines and ready-to-use API interfaces.
 
-## Key Features
+## ✨ Key Features
 
-- **Modern Architecture**: Built on `AsyncExecutor` and `ThreadExecutor` with advanced error handling
-- **Intelligent Error Handling**: Automatic classification and handling of different error types
-- **Circuit Breaker Pattern**: Fault tolerance with user interaction options
-- **Adaptive Rate Limiting**: Smart rate limiting with backoff and recovery
-- **Optional Dependencies**: Graceful handling of missing dependencies
-- **Predefined API Interfaces**:
-  - OpenAI API (supports GPT series models and cost tracking)
-  - CrossRef API (academic literature metadata retrieval)  
-  - PDF Processing (document text extraction)
+- **🚀 Unified Architecture**: Clean separation between core execution engines and API interfaces
+- **🧠 Intelligent Error Handling**: Automatic error classification with severity-based handling strategies
+- **⚡ Dual Execution Models**: AsyncExecutor for I/O-bound tasks, ThreadExecutor for CPU-bound tasks
+- **🛡️ Circuit Breaker Pattern**: Fault tolerance with user interaction and adaptive recovery
+- **📊 Smart Rate Limiting**: Adaptive rate control with exponential backoff and recovery
+- **🔧 Graceful Dependencies**: Optional API modules with automatic fallback
+- **📝 Console Error Logging**: Real-time error reporting without interfering with progress bars
+- **🎯 Ready-to-Use APIs**: Pre-built **synchronized** interfaces for OpenAI, CrossRef, and PDF processing
+- **⚡ Synchronized API Functions**: No `await` needed - APIs internally handle async execution
 
-## Installation
+## 🚀 Quick Start
+
+### Installation
 
 ```bash
 pip install multask
 ```
 
-## Quick Start
+### Basic Usage
 
-### Using Predefined API Interfaces
+#### Using Synchronized API Functions (Recommended)
 
 ```python
-from multask import apis
+from multask.apis import openai_batch_query, crossref_batch_query, pdf_batch_extract
 
-# Check available APIs
-print("Available APIs:", apis.get_available_apis())
+# OpenAI API - Synchronous interface
+messages = [
+    [{"role": "user", "content": "What is machine learning?"}],
+    [{"role": "user", "content": "Explain quantum computing."}]
+]
 
-# OpenAI API
-if 'openai' in apis.get_available_apis():
-    messages_list = [
-        [{"role": "user", "content": "What is machine learning?"}],
-        [{"role": "user", "content": "Explain quantum computing."}]
-    ]
-    
-    results = await apis.openai_batch_query(
-        messages_list=messages_list,
-        model="gpt-4o-mini",
-        max_workers=3,
-        rate_limit_rpm=100
-    )
-    
-    # Calculate cost
-    token_usages = [r.get('token_usage', {}) for r in results]
-    cost = apis.openai_price_calculator(token_usages, "gpt-4o-mini")
-    print(f"Total cost: ${cost}")
+results = openai_batch_query(
+    messages_list=messages,
+    model="gpt-4o-mini",
+    max_workers=3,
+    enable_error_printing=True
+)
 
-# CrossRef API
-if 'crossref' in apis.get_available_apis():
-    requests = [
-        {'type': 'doi', 'doi': '10.1038/nature12373'},
-        {'type': 'query', 'query': 'machine learning', 'rows': 5}
-    ]
-    
-    results = await apis.crossref_batch_query(
-        requests=requests,
-        mailto="researcher@university.edu",
-        max_workers=2
-    )
+print(f"Processed {len(results)} OpenAI requests")
 
-# PDF Processing
-if 'pdf' in apis.get_available_apis():
-    results = await apis.pdf_batch_extract(
-        pdf_paths=["doc1.pdf", "doc2.pdf"],
-        output_dir="extracted_texts",
-        method="advanced"
-    )
+# CrossRef API - Synchronous interface
+requests = [
+    {'type': 'doi', 'doi': '10.1038/nature12373'},
+    {'type': 'query', 'query': 'machine learning', 'rows': 5}
+]
+
+results = crossref_batch_query(
+    requests=requests,
+    mailto="researcher@university.edu",
+    max_workers=2
+)
+
+print(f"Processed {len(results)} CrossRef requests")
 ```
 
-### Using Core Executors for Custom Tasks
+#### Using Core Executors (Advanced)
 
 ```python
-import multask
+import asyncio
+from multask import AsyncExecutor
+
+# Custom async task execution
+async def my_worker(data, **kwargs):
+    # Your task logic here
+    return f"Processed: {data}"
+
+async def main():
+    # Create executor with smart controller
+    executor = AsyncExecutor(
+        worker=my_worker,
+        controller_type="smart",
+        max_workers=3,
+        enable_error_printing=True
+    )
+    
+    # Execute tasks
+    tasks = [{"data": f"task_{i}"} for i in range(10)]
+    results = await executor.execute(tasks)
+    
+    for index, result in results:
+        print(f"Task {index}: {result}")
+
+asyncio.run(main())
+```
+
+## 🏗️ Architecture Overview
+
+### Core Components
+
+#### Executors
+- **`AsyncExecutor`**: High-performance async task execution with intelligent error handling
+- **`ThreadExecutor`**: Thread-based execution for CPU-bound or synchronous tasks
+
+#### Controllers
+- **`BasicController`**: Simple rate limiting with basic retry logic
+- **`SmartController`**: Advanced adaptive control with circuit breaker and user interaction
+
+#### Error Handling
+- **Unified Exception System**: Automatic error classification and severity-based handling
+- **Console Error Logging**: Real-time error reporting with timestamps and task indexing
+- **Circuit Breaker Integration**: Fault tolerance with user interaction options
+
+## 📚 API Interfaces
+
+> **Note**: All API batch functions (`openai_batch_query`, `crossref_batch_query`, `pdf_batch_extract`) are **synchronized** - they internally use async execution but provide synchronous interfaces. No `await` needed!
+
+### OpenAI Integration
+
+```python
+from multask.apis import OpenAIExecutor, openai_batch_query
+
+# Batch OpenAI requests
+messages_list = [
+    [{"role": "user", "content": "What is machine learning?"}],
+    [{"role": "user", "content": "Explain quantum computing."}]
+]
+
+results = openai_batch_query(
+    messages_list=messages_list,
+    model="gpt-4o-mini",
+    max_workers=3,
+    enable_error_printing=True
+)
+
+# Calculate costs
+from multask.apis import openai_price_calculator
+cost = openai_price_calculator([r.get('token_usage', {}) for r in results], "gpt-4o-mini")
+print(f"Total cost: ${cost}")
+```
+
+### CrossRef Academic API
+
+```python
+from multask.apis import CrossRefExecutor, crossref_batch_query
+
+# Academic literature queries
+requests = [
+    {'type': 'doi', 'doi': '10.1038/nature12373'},
+    {'type': 'query', 'query': 'machine learning', 'rows': 5}
+]
+
+results = crossref_batch_query(
+    requests=requests,
+    mailto="researcher@university.edu",
+    max_workers=2
+)
+```
+
+### PDF Processing
+
+```python
+from multask.apis import PDFExecutor, pdf_batch_extract
+
+# Extract text from PDFs
+results = pdf_batch_extract(
+    pdf_paths=["doc1.pdf", "doc2.pdf"],
+    output_dir="extracted_texts",
+    method="advanced"  # or "simple"
+)
+```
+
+## ⚙️ Advanced Configuration
+
+### Controller Configuration
+
+```python
+from multask import AsyncExecutor, SmartController, SmartControllerConfig, RateLimitConfig
+
+# Smart controller with adaptive rate limiting
+executor = AsyncExecutor(
+    worker=my_worker,
+    controller_type="smart",
+    smart_controller_config=SmartControllerConfig(
+        rate_limit_config=RateLimitConfig(
+            max_rpm=100,
+            safety_factor=0.9
+        ),
+        failure_threshold=5,
+        circuit_timeout=60.0,
+        adaptive_speed_enabled=True
+    ),
+    enable_user_interaction=True,
+    enable_error_printing=True
+)
+```
+
+### Error Handling and Circuit Breaker
+
+```python
+# The system automatically handles:
+# - Rate limit errors with exponential backoff
+# - Network instability with retry logic
+# - Circuit breaker activation with user prompts
+# - Fatal errors with immediate termination
+
+# Error messages are printed to console in real-time:
+# [2024-01-15 10:30:45] ERROR in task 5: Rate limit exceeded, retrying in 2s (attempt 2/3)
+# [2024-01-15 10:30:47] ERROR in task 3: Circuit breaker triggered: Too many failures
+```
+
+### Shared Context
+
+```python
 import aiohttp
 
-async def custom_api_worker(session, endpoint, api_key, **kwargs):
-    headers = {"Authorization": f"Bearer {api_key}"}
-    async with session.get(endpoint, headers=headers) as response:
+async def api_worker(session, endpoint, **kwargs):
+    async with session.get(endpoint) as response:
         return await response.json()
 
-# Create executor with shared context
+# Use shared context for common parameters
 async with aiohttp.ClientSession() as session:
-    executor = multask.AsyncExecutor(
-        worker=custom_api_worker,
+    executor = AsyncExecutor(
+        worker=api_worker,
         shared_context={
             "session": session,
             "api_key": "your-api-key"
         },
-        max_workers=5,
-        rate_limit_config=multask.RateLimitConfig(base_rpm=100),
-        circuit_breaker_config=multask.CircuitBreakerConfig(failure_threshold=3)
+        max_workers=5
     )
     
     tasks = [
@@ -103,30 +232,33 @@ async with aiohttp.ClientSession() as session:
     results = await executor.execute(tasks)
 ```
 
-## Architecture
+## 🔧 Error Handling System
 
-### Core Components
+### Automatic Error Classification
 
-- **`AsyncExecutor`**: Modern asynchronous task executor with intelligent error handling
-- **`ThreadExecutor`**: Thread-based executor for CPU-bound or synchronous tasks
-- **`RateLimiter`**: Adaptive rate limiting with backoff and recovery
-- **`CircuitBreaker`**: Fault tolerance pattern with user interaction options
+The system automatically classifies errors into severity levels:
 
-### Exception Hierarchy
+- **`RECOVERABLE`**: Temporary issues, retry with backoff
+- **`RATE_LIMITED`**: Rate limit exceeded, adaptive backoff
+- **`CIRCUIT_BREAKER`**: Too many failures, circuit breaker activation
+- **`FATAL`**: Programming errors, immediate termination
 
-- **`MultaskError`**: Base exception with severity classification
-- **`InternetError`**: Connectivity issues (triggers circuit breaker)
-- **`FatalError`**: Programming errors (stops execution)
-- **`RateLimitError`**: Rate limiting with adaptive backoff
-- **`NetworkInstabilityError`**: Temporary issues (retryable)
+### Console Error Logging
 
-### Predefined API Interfaces
+```python
+# Enable real-time error logging
+executor = AsyncExecutor(
+    worker=my_worker,
+    enable_error_printing=True  # Default: True
+)
 
-- **`apis.openai_*`**: OpenAI API integration with cost tracking
-- **`apis.crossref_*`**: CrossRef academic literature API
-- **`apis.pdf_*`**: PDF document processing (optional dependency)
+# Error output format:
+# [2024-01-15 10:30:45] ERROR in task 5: Rate limit exceeded, retrying in 2s (attempt 2/3)
+# [2024-01-15 10:30:47] ERROR in task 3: Circuit breaker triggered: Too many failures
+# [2024-01-15 10:30:47] ERROR in task 3: Action: skip - Skipped due to circuit breaker
+```
 
-## Installation Options
+## 📦 Installation Options
 
 ### Basic Installation
 ```bash
@@ -136,46 +268,100 @@ pip install multask
 ### With Optional Dependencies
 ```bash
 # For PDF processing
-pip install multask[pdf]  # or: pip install pdfplumber pdfminer.six
+pip install multask[pdf]
 
 # For development
-pip install multask[dev]  # includes testing dependencies
+pip install multask[dev]
 ```
 
-## Advanced Features
-
-### Error Handling and Circuit Breaker
-
+### Check Available APIs
 ```python
-from multask import AsyncExecutor, CircuitBreakerConfig, RateLimitConfig
+from multask.apis import get_available_apis, check_api_availability
 
-executor = AsyncExecutor(
-    worker=my_worker,
-    circuit_breaker_config=CircuitBreakerConfig(
-        failure_threshold=5,  # Open circuit after 5 failures
-        timeout=60.0,        # Try half-open after 60 seconds
-        success_threshold=3   # Close after 3 successes
-    ),
-    rate_limit_config=RateLimitConfig(
-        base_rpm=100,                    # Base rate limit
-        rate_limit_backoff_factor=2.0,   # Backoff multiplier
-        max_backoff_factor=10.0          # Maximum backoff
-    ),
-    enable_user_interaction=True  # Prompt user on circuit breaker
-)
-```
-
-### Graceful Dependency Handling
-
-```python
-from multask import apis
-
-# Check what's available
-available_apis = apis.get_available_apis()
-print(f"Available: {available_apis}")
+# List available APIs
+print("Available APIs:", get_available_apis())
 
 # Check specific API
-available, error = apis.check_api_availability('pdf')
+available, error = check_api_availability('pdf')
 if not available:
     print(f"PDF processing unavailable: {error}")
+```
+
+## 🎯 Performance Features
+
+### Progress Tracking
+- Real-time progress bars with `tqdm` integration
+- Rate limiting visualization
+- Error logging without progress bar interference
+
+### Adaptive Rate Limiting
+- Intelligent backoff based on error patterns
+- Automatic recovery from rate limiting
+- Configurable safety factors and limits
+
+### Circuit Breaker
+- Automatic failure detection
+- User interaction on critical failures
+- Configurable thresholds and timeouts
+
+## 🔄 Migration from Previous Versions
+
+The new architecture maintains backward compatibility while providing cleaner interfaces:
+
+```python
+# Old way (still works)
+from multask import AsyncExecutor, RateLimiter
+
+# New way (recommended)
+from multask import AsyncExecutor, BasicController, SmartController
+```
+
+## 📖 Examples
+
+### Custom API Integration
+
+```python
+import aiohttp
+from multask import AsyncExecutor
+
+async def custom_api_worker(session, url, headers=None, **kwargs):
+    async with session.get(url, headers=headers) as response:
+        response.raise_for_status()
+        return await response.json()
+
+async with aiohttp.ClientSession() as session:
+    executor = AsyncExecutor(
+        worker=custom_api_worker,
+        shared_context={"session": session},
+        max_workers=5,
+        enable_error_printing=True
+    )
+    
+    tasks = [
+        {"url": "https://api.example.com/data1"},
+        {"url": "https://api.example.com/data2"}
+    ]
+    
+    results = await executor.execute(tasks)
+    print(f"Processed {len(results)} tasks")
+```
+
+### Thread-based Processing
+
+```python
+from multask import ThreadExecutor
+
+def cpu_intensive_worker(data, **kwargs):
+    # CPU-intensive task
+    result = sum(i**2 for i in range(data))
+    return result
+
+executor = ThreadExecutor(
+    worker=cpu_intensive_worker,
+    max_workers=4,
+    enable_error_printing=True
+)
+
+tasks = [{"data": 1000} for _ in range(10)]
+results = executor.execute(tasks)
 ```
