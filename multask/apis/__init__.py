@@ -11,48 +11,28 @@ Each interface handles optional dependencies gracefully using try-except ImportE
 
 # Import interfaces with graceful error handling
 _available_apis = []
+_import_errors = {}
+__all__ = []
 
-# CrossRef API interface
-try:
-    from .crossref_api import CrossRefExecutor, crossref_batch_query
-    _available_apis.append('crossref')
-    __all__ = (locals().get("__all__", [])) + [
-        "CrossRefExecutor",
-        "crossref_batch_query",
-    ]
-except ImportError as e:
-    CrossRefExecutor = None
-    crossref_batch_query = None
-    _crossref_import_error = str(e)
+# API interfaces to import
+_API_INTERFACES = [
+    ('crossref', 'crossref_api', ['CrossRefExecutor', 'crossref_batch_query']),
+    ('openai', 'openai_api', ['OpenAIExecutor', 'openai_batch_query', 'openai_price_calculator']),
+    ('pdf', 'pdf_api', ['PDFExecutor', 'pdf_batch_extract'])
+]
 
-# OpenAI API interface  
-try:
-    from .openai_api import OpenAIExecutor, openai_batch_query, openai_price_calculator
-    _available_apis.append('openai')
-    __all__ = (locals().get("__all__", [])) + [
-        'OpenAIExecutor', 'openai_batch_query', 'openai_price_calculator'
-    ]
-except ImportError as e:
-    OpenAIExecutor = None
-    openai_batch_query = None
-    openai_price_calculator = None
-    _openai_import_error = str(e)
-
-# PDF processing interface
-try:
-    from .pdf_api import PDFExecutor, pdf_batch_extract
-    _available_apis.append('pdf')
-    __all__ = (locals().get("__all__", [])) + [
-        'PDFExecutor', 'pdf_batch_extract'
-    ]
-except ImportError as e:
-    PDFExecutor = None
-    pdf_batch_extract = None
-    _pdf_import_error = str(e)
-
-# Ensure __all__ exists
-if '__all__' not in locals():
-    __all__ = []
+# Import each API interface
+for api_name, module_name, exports in _API_INTERFACES:
+    try:
+        module = __import__(f'.{module_name}', package=__name__, level=1)
+        for export in exports:
+            globals()[export] = getattr(module, export)
+            __all__.append(export)
+        _available_apis.append(api_name)
+    except ImportError as e:
+        _import_errors[api_name] = str(e)
+        for export in exports:
+            globals()[export] = None
 
 # Add utility functions
 __all__ += ['get_available_apis', 'check_api_availability']
@@ -73,21 +53,10 @@ def check_api_availability(api_name: str) -> tuple[bool, str]:
     Returns:
         Tuple of (is_available, error_message)
     """
-    if api_name == 'crossref':
-        if 'crossref' in _available_apis:
-            return True, ""
-        return False, globals().get('_crossref_import_error', 'Unknown import error')
-    
-    elif api_name == 'openai':
-        if 'openai' in _available_apis:
-            return True, ""
-        return False, globals().get('_openai_import_error', 'Unknown import error')
-    
-    elif api_name == 'pdf':
-        if 'pdf' in _available_apis:
-            return True, ""
-        return False, globals().get('_pdf_import_error', 'Unknown import error')
-    
+    if api_name in _available_apis:
+        return True, ""
+    elif api_name in _import_errors:
+        return False, _import_errors[api_name]
     else:
         return False, f"Unknown API: {api_name}"
 

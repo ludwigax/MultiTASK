@@ -181,4 +181,4 @@ def classify_exception(exc: Exception) -> MultaskError:
         return FatalError("Programming error", original_error=exc)
     
     # Default: treat as network instability for safety
-    return NetworkInstabilityError("Unknown error", original_error=exc)
+    return CircuitBreakerError("Unknown error", original_error=exc)

@@ -241,29 +241,8 @@ class CrossRefExecutor(AsyncExecutor):
             mailto: Email for polite pool access (recommended)
             **kwargs: Additional executor parameters
         """
-        # Set up controller configuration
-        controller_type = kwargs.pop('controller_type', 'smart')  # Default to smart controller
-        
-        if controller_type == 'smart':
-            if 'smart_controller_config' not in kwargs:
-                kwargs['smart_controller_config'] = SmartControllerConfig(
-                    rate_limit_config=RateLimitConfig(
-                        max_rpm=50,  # Conservative rate limit
-                        safety_factor=0.8
-                    ),
-                    failure_threshold=3,
-                    circuit_timeout=120.0  # 2 minutes
-                )
-        else:
-            if 'basic_controller_config' not in kwargs:
-                kwargs['basic_controller_config'] = BasicControllerConfig(
-                    rate_limit_config=RateLimitConfig(
-                        max_rpm=50,
-                        safety_factor=0.8
-                    )
-                )
-        
-        kwargs['controller_type'] = controller_type
+        # Set up default controller configuration
+        _setup_crossref_controller_config(kwargs)
         
         # Use dynamic worker selection
         super().__init__(
@@ -395,3 +374,29 @@ def crossref_batch_query(
             return future.result()
     else:
         return loop.run_until_complete(_async_batch_query())
+
+
+def _setup_crossref_controller_config(kwargs: dict) -> None:
+    """Set up default controller configuration for CrossRef API."""
+    controller_type = kwargs.pop('controller_type', 'smart')
+    
+    if controller_type == 'smart':
+        if 'smart_controller_config' not in kwargs:
+            kwargs['smart_controller_config'] = SmartControllerConfig(
+                rate_limit_config=RateLimitConfig(
+                    max_rpm=50,  # Conservative rate limit
+                    safety_factor=0.8
+                ),
+                failure_threshold=3,
+                circuit_timeout=120.0  # 2 minutes
+            )
+    else:
+        if 'basic_controller_config' not in kwargs:
+            kwargs['basic_controller_config'] = BasicControllerConfig(
+                rate_limit_config=RateLimitConfig(
+                    max_rpm=50,
+                    safety_factor=0.8
+                )
+            )
+    
+    kwargs['controller_type'] = controller_type

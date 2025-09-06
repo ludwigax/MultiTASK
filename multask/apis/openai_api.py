@@ -111,33 +111,10 @@ async def openai_chat_worker(
                 response_data = await response.json()
                 
                 # Process response
-                content = ""
-                token_usage = {}
-                
-                if "choices" in response_data and response_data["choices"]:
-                    choice = response_data["choices"][0]
-                    if "message" in choice:
-                        content = choice["message"].get("content", "")
-                
-                if "usage" in response_data:
-                    usage = response_data["usage"]
-                    completion_details = usage.get("completion_tokens_details", {})
-                    token_usage = {
-                        "prompt_tokens": usage.get("prompt_tokens", 0),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
-                        "reasoning_tokens": completion_details.get("reasoning_tokens", 0),
-                        "cached_tokens": completion_details.get("cached_tokens", 0)
-                    }
+                content, token_usage = _extract_response_data(response_data)
                 
                 # Save content if requested
-                if save_path and content:
-                    try:
-                        with open(save_path, "w", encoding="utf-8") as f:
-                            f.write(content)
-                    except Exception as e:
-                        # Don't fail the whole request for save errors
-                        pass
+                _save_content_if_needed(content, save_path)
                 
                 return {
                     "content": content,
@@ -424,3 +401,38 @@ def openai_batch_query(
             return future.result()
     else:
         return loop.run_until_complete(_async_batch_query())
+
+
+def _extract_response_data(response_data: dict) -> tuple[str, dict]:
+    """Extract content and token usage from OpenAI response data."""
+    content = ""
+    token_usage = {}
+    
+    if "choices" in response_data and response_data["choices"]:
+        choice = response_data["choices"][0]
+        if "message" in choice:
+            content = choice["message"].get("content", "")
+    
+    if "usage" in response_data:
+        usage = response_data["usage"]
+        completion_details = usage.get("completion_tokens_details", {})
+        token_usage = {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "reasoning_tokens": completion_details.get("reasoning_tokens", 0),
+            "cached_tokens": completion_details.get("cached_tokens", 0)
+        }
+    
+    return content, token_usage
+
+
+def _save_content_if_needed(content: str, save_path: Optional[str]) -> None:
+    """Save content to file if path is provided."""
+    if save_path and content:
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception:
+            # Don't fail the whole request for save errors
+            pass

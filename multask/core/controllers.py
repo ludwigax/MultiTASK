@@ -245,26 +245,19 @@ class SmartController(BaseController):
         """Wait until a request slot is available with circuit breaker check."""
         while True:
             async with self._lock:
-                # Update circuit breaker state
+                # Update states
                 await self._update_circuit_state()
+                await self._update_adaptive_state()
                 
-                # Check if circuit is open
+                # Check circuit breaker
                 if self.circuit_state == CircuitState.OPEN:
                     raise CircuitBreakerError(
                         f"Circuit breaker is OPEN after {self.failure_count} failures",
                         failure_count=self.failure_count
                     )
                 
-                # Update adaptive state
-                await self._update_adaptive_state()
-                
-                # Check rate limiting with adaptive RPM
-                if self.current_rpm >= self.effective_rpm:
-                    await asyncio.sleep(1.0)
-                    continue
-                
-                # Record request in rate limiter
-                if await self.rate_limiter.acquire():
+                # Check rate limiting
+                if self.current_rpm < self.effective_rpm and await self.rate_limiter.acquire():
                     break
             
             await asyncio.sleep(1.0)
@@ -283,47 +276,54 @@ class SmartController(BaseController):
                 await self.wait_for_slot()
                 
                 # Execute the worker
-                if asyncio.iscoroutinefunction(worker):
-                    result = await worker(**task_params)
-                else:
-                    result = worker(**task_params)
+                result = await self._execute_worker(worker, task_params)
                 
                 # Record success
                 await self._on_success()
                 return (True, result)
                 
             except CircuitBreakerError as e:
-                # Circuit breaker is open, let caller handle user interaction
                 return (False, {"circuit_breaker_error": str(e)})
                 
             except Exception as exc:
-                # Classify and handle the error
-                multask_error = classify_exception(exc)
-                
-                # Record failure for circuit breaker
-                if multask_error.severity in [ErrorSeverity.CIRCUIT_BREAKER, ErrorSeverity.FATAL]:
-                    await self._on_failure()
-                
-                # Handle based on severity
-                if multask_error.severity == ErrorSeverity.FATAL:
-                    return (False, {"error": f"Fatal error: {multask_error}"})
-                
-                elif multask_error.severity == ErrorSeverity.RATE_LIMITED:
-                    await self._on_rate_limit_error(multask_error)
-                    if isinstance(multask_error, RateLimitError) and multask_error.retry_after:
-                        await asyncio.sleep(multask_error.retry_after)
-                    else:
-                        await asyncio.sleep(2 ** attempt)
-                
-                elif multask_error.severity == ErrorSeverity.RECOVERABLE:
-                    await asyncio.sleep(2 ** attempt)
-                
-                else:  # CIRCUIT_BREAKER severity
-                    await self._on_failure()
-                    return (False, {"error": f"Circuit breaker error: {multask_error}"})
+                should_continue, error_result = await self._handle_execution_error(exc, attempt, max_retries)
+                if not should_continue:
+                    return error_result
         
-        # All retries exhausted
         return (False, {"error": f"Max retries ({max_retries}) exceeded"})
+    
+    async def _execute_worker(self, worker: Callable, task_params: Dict[str, Any]) -> Any:
+        """Execute the worker function (async or sync)."""
+        if asyncio.iscoroutinefunction(worker):
+            return await worker(**task_params)
+        else:
+            return worker(**task_params)
+    
+    async def _handle_execution_error(self, exc: Exception, attempt: int, max_retries: int) -> Tuple[bool, Tuple[bool, Any]]:
+        """Handle execution error and return whether to continue retrying."""
+        multask_error = classify_exception(exc)
+        
+        # Record failure for circuit breaker if needed
+        if multask_error.severity in [ErrorSeverity.CIRCUIT_BREAKER, ErrorSeverity.FATAL]:
+            await self._on_failure()
+        
+        # Handle based on severity
+        if multask_error.severity == ErrorSeverity.FATAL:
+            return False, (False, {"error": f"Fatal error: {multask_error}"})
+        
+        elif multask_error.severity == ErrorSeverity.RATE_LIMITED:
+            await self._on_rate_limit_error(multask_error)
+            delay = multask_error.retry_after if isinstance(multask_error, RateLimitError) and multask_error.retry_after else (2 ** attempt)
+            await asyncio.sleep(delay)
+            return True, None  # Continue retrying
+        
+        elif multask_error.severity == ErrorSeverity.RECOVERABLE:
+            await asyncio.sleep(2 ** attempt)
+            return True, None  # Continue retrying
+        
+        else:  # CIRCUIT_BREAKER severity
+            await self._on_failure()
+            return False, (False, {"error": f"Circuit breaker error: {multask_error}"})
     
     async def _update_circuit_state(self) -> None:
         """Update circuit breaker state."""

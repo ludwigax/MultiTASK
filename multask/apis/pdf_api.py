@@ -392,21 +392,8 @@ class PDFExecutor(ThreadExecutor):
         Args:
             **kwargs: Additional executor parameters
         """
-        # Set up controller configuration
-        controller_type = kwargs.pop('controller_type', 'basic')  # Default to basic for PDF processing
-        
-        if controller_type == 'smart':
-            if 'smart_controller_config' not in kwargs:
-                kwargs['smart_controller_config'] = SmartControllerConfig(
-                    rate_limit_config=RateLimitConfig(max_rpm=1000, safety_factor=0.9)
-                )
-        else:
-            if 'basic_controller_config' not in kwargs:
-                kwargs['basic_controller_config'] = BasicControllerConfig(
-                    rate_limit_config=RateLimitConfig(max_rpm=1000, safety_factor=0.9)
-                )
-        
-        kwargs['controller_type'] = controller_type
+        # Set up default controller configuration
+        _setup_pdf_controller_config(kwargs)
         
         super().__init__(
             worker=pdf_extract_worker,
@@ -482,3 +469,21 @@ def pdf_batch_extract(
             return future.result()
     else:
         return loop.run_until_complete(executor.execute(tasks))
+
+
+def _setup_pdf_controller_config(kwargs: dict) -> None:
+    """Set up default controller configuration for PDF processing."""
+    controller_type = kwargs.pop('controller_type', 'basic')  # Default to basic for PDF processing
+    
+    if controller_type == 'smart':
+        if 'smart_controller_config' not in kwargs:
+            kwargs['smart_controller_config'] = SmartControllerConfig(
+                rate_limit_config=RateLimitConfig(max_rpm=1000, safety_factor=0.9)
+            )
+    else:
+        if 'basic_controller_config' not in kwargs:
+            kwargs['basic_controller_config'] = BasicControllerConfig(
+                rate_limit_config=RateLimitConfig(max_rpm=1000, safety_factor=0.9)
+            )
+    
+    kwargs['controller_type'] = controller_type
