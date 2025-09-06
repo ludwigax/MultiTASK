@@ -48,7 +48,8 @@ class BaseExecutor(ABC):
         basic_controller_config: Optional[BasicControllerConfig] = None,
         smart_controller_config: Optional[SmartControllerConfig] = None,
         enable_user_interaction: bool = True,
-        shared_context: Optional[Dict[str, Any]] = None
+        shared_context: Optional[Dict[str, Any]] = None,
+        enable_error_printing: bool = True
     ):
         """
         Initialize base executor.
@@ -64,6 +65,7 @@ class BaseExecutor(ABC):
             smart_controller_config: Configuration for SmartController
             enable_user_interaction: Whether to prompt user on circuit breaker
             shared_context: Shared parameters passed to all worker calls
+            enable_error_printing: Whether to print errors to console
         """
         self.worker = worker
         self.result_processor = result_processor
@@ -71,6 +73,7 @@ class BaseExecutor(ABC):
         self.max_retries = max_retries
         self.enable_user_interaction = enable_user_interaction
         self.shared_context = shared_context or {}
+        self.enable_error_printing = enable_error_printing
         
         # Initialize controller
         if controller is not None:
@@ -152,6 +155,23 @@ class BaseExecutor(ABC):
             str(error), 
             progress_info
         )
+    
+    def _print_error(self, error_msg: str, task_index: Optional[int] = None) -> None:
+        """Print error message to console if error printing is enabled."""
+        if self.enable_error_printing:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            if task_index is not None:
+                error_text = f"[{timestamp}] ERROR in task {task_index}: {error_msg}"
+            else:
+                error_text = f"[{timestamp}] ERROR: {error_msg}"
+            
+            # Use tqdm.write to avoid interfering with progress bars
+            # Check if we're in a context where progress bars might be active
+            try:
+                tqdm.write(error_text)
+            except:
+                # Fallback to regular print if tqdm.write fails
+                print(error_text)
     
     @abstractmethod
     async def execute(self, tasks: List[Dict[str, Any]]) -> List[Tuple[int, Any]]:
@@ -294,11 +314,17 @@ class AsyncExecutor(BaseExecutor):
             # Handle circuit breaker errors for smart controller
             if self._is_circuit_breaker_error(result):
                 return self._handle_circuit_breaker_result(index, result)
+            
+            # Print error if it's an error result
+            if isinstance(result, dict) and "error" in result:
+                self._print_error(str(result["error"]), index)
                 
             return (index, result)
                 
         except Exception as exc:
-            return (index, {"error": f"Unexpected error in task execution: {exc}"})
+            error_msg = f"Unexpected error in task execution: {exc}"
+            self._print_error(error_msg, index)
+            return (index, {"error": error_msg})
     
     def _is_circuit_breaker_error(self, result: Any) -> bool:
         """Check if result contains a circuit breaker error."""
@@ -308,18 +334,27 @@ class AsyncExecutor(BaseExecutor):
     
     def _handle_circuit_breaker_result(self, index: int, result: Dict) -> Tuple[int, Any]:
         """Handle circuit breaker error result."""
+        circuit_error = result["circuit_breaker_error"]
+        self._print_error(f"Circuit breaker triggered: {circuit_error}", index)
+        
         action = self._handle_circuit_breaker_error(
-            CircuitBreakerError(result["circuit_breaker_error"])
+            CircuitBreakerError(circuit_error)
         )
         
         if action == 'skip':
-            return (index, {"error": f"Skipped due to circuit breaker: {result['circuit_breaker_error']}"})
+            error_msg = f"Skipped due to circuit breaker: {circuit_error}"
+            self._print_error(f"Action: {action} - {error_msg}", index)
+            return (index, {"error": error_msg})
         elif action == 'stop':
             self.should_stop = True
-            return (index, {"error": f"Stopped due to circuit breaker: {result['circuit_breaker_error']}"})
+            error_msg = f"Stopped due to circuit breaker: {circuit_error}"
+            self._print_error(f"Action: {action} - {error_msg}", index)
+            return (index, {"error": error_msg})
         elif action == 'retry':
             # Note: Retry logic could be implemented here if needed
-            return (index, {"error": f"Retry requested but not implemented in this context"})
+            error_msg = f"Retry requested but not implemented in this context"
+            self._print_error(f"Action: {action} - {error_msg}", index)
+            return (index, {"error": error_msg})
         
         return (index, result)
 
@@ -363,7 +398,8 @@ class ThreadExecutor(BaseExecutor):
                         worker_results = future.result()
                         results.extend(worker_results)
                     except Exception as e:
-                        tqdm.write(f"Worker thread failed: {e}")
+                        error_msg = f"Worker thread failed: {e}"
+                        self._print_error(error_msg)
             
             # Sort results by index
             results.sort(key=lambda x: x[0])
@@ -419,7 +455,9 @@ class ThreadExecutor(BaseExecutor):
             return self._sync_retry_execution(index, combined_params)
                 
         except Exception as exc:
-            return (index, {"error": f"Unexpected error: {exc}"})
+            error_msg = f"Unexpected error: {exc}"
+            self._print_error(error_msg, index)
+            return (index, {"error": error_msg})
     
     def _sync_retry_execution(self, index: int, combined_params: Dict[str, Any]) -> Tuple[int, Any]:
         """Execute with synchronous retry logic."""
@@ -431,16 +469,23 @@ class ThreadExecutor(BaseExecutor):
                 multask_error = classify_exception(exc)
                 
                 if multask_error.severity == ErrorSeverity.FATAL:
-                    return (index, {"error": f"Fatal error: {multask_error}"})
+                    error_msg = f"Fatal error: {multask_error}"
+                    self._print_error(error_msg, index)
+                    return (index, {"error": error_msg})
                 
                 if attempt < self.max_retries:
                     # Calculate backoff delay
                     delay = self._get_retry_delay(multask_error, attempt)
+                    self._print_error(f"Retrying in {delay}s due to: {multask_error} (attempt {attempt + 1}/{self.max_retries})", index)
                     time.sleep(delay)
                 else:
-                    return (index, {"error": f"Max retries ({self.max_retries}) exceeded: {exc}"})
+                    error_msg = f"Max retries ({self.max_retries}) exceeded: {exc}"
+                    self._print_error(error_msg, index)
+                    return (index, {"error": error_msg})
         
-        return (index, {"error": f"Max retries ({self.max_retries}) exceeded"})
+        error_msg = f"Max retries ({self.max_retries}) exceeded"
+        self._print_error(error_msg, index)
+        return (index, {"error": error_msg})
     
     def _get_retry_delay(self, multask_error, attempt: int) -> float:
         """Calculate appropriate retry delay based on error type."""
